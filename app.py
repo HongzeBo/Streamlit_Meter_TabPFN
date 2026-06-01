@@ -175,8 +175,9 @@ tab_calc, tab_info = st.tabs(["**Calc & Ranking**", "**Info**"])
 
 with tab_calc:
     rank, old = load_rank_tables()
-    st.write("***Calibration RMSE of every hygro-/thermo-/barometer pair "
-             "(RandomForest reference values, 100× 80:20 splits).***")
+    st.write("***TabPFN test RMSE of each hygro-/thermo-/barometer pair "
+             "(20× 80:20 random splits, N ≥ 200 pairs). H₂O in wt.%, T in °C, "
+             "P in kbar — the same numbers as the paper's TabPFN Tables 2–4.***")
     st.dataframe(rank, hide_index=True)
 
     st.subheader("***Step 1: What do you want to predict?***")
