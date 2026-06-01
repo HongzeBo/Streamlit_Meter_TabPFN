@@ -10,4 +10,8 @@ matplotlib>=3.7
 openpyxl>=3.1
 scikit-learn>=1.6
 torch>=2.4
-tabpfn>=6.4
+# Pin EXACTLY 6.4.1: it is the last release that downloads the TabPFN-v2
+# checkpoint WITHOUT a license/PriorLabs-token gate. 7.x/8.x add
+# `ensure_license_accepted()` -> TabPFNLicenseError in a headless deploy.
+# 6.4.1's deps are all open floors, so they still resolve on Python 3.14.
+tabpfn==6.4.1
