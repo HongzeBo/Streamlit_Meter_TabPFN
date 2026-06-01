@@ -1,0 +1,13 @@
+# CPU-only PyTorch wheels (Streamlit Cloud is Linux x86_64). Keep this line
+# FIRST so pip prefers the CPU build and does not pull the multi-GB CUDA wheel.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+streamlit>=1.36
+numpy>=2.0
+pandas>=2.0
+scipy>=1.11
+matplotlib>=3.7
+openpyxl>=3.1
+scikit-learn>=1.6
+torch>=2.4
+tabpfn>=6.4
