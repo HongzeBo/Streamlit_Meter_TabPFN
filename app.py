@@ -36,7 +36,9 @@ TARGETS = {
     "Water (wt.%)":       dict(key="hygro", col=-3, unit="H$_2$O (wt.%)"),
     "Temperature (°C)":   dict(key="thermo", col=-1, unit="T (°C)"),
     "Pressure (kbar)":    dict(key="baro", col=-2, unit="P (kbar)"),
+    "Melt fraction (melt-only)": dict(key="meltfrac", col=-1, unit="Melt fraction"),
 }
+MELTFRAC_SHEET = 57   # appended calibration sheet: all melts, 10 majors -> F
 
 
 def sheet_order_names():
@@ -130,12 +132,59 @@ def read_template(uploaded) -> np.ndarray:
     return block.to_numpy(float)
 
 
-def harker_figure(data_in, y_pred, cal_X, unit, block_offset=0):
-    """3x3 Harker panel: SiO2 vs the other 9 oxides, calibration grey + input colour."""
+def domain_flags(cal_X, data_in):
+    """Per-sample in-/out-of-domain test against the calibration convex hull.
+
+    For every block present in the upload (melt majors at columns 0-9, and the
+    mineral majors at 10-19 when a second component is supplied) we build the
+    SiO2-vs-oxide convex hull of the calibration set for the same nine
+    projections shown in the Harker panel, and test each input row against all
+    of them. A sample is in-domain only when it lies inside every projection's
+    hull; otherwise the prediction is an extrapolation. Returns
+    ``(in_domain bool[n], n_out int[n])`` where ``n_out`` counts how many
+    projections a sample fell outside of.
+    """
+    from matplotlib.path import Path as _Path
+    n = len(data_in)
+    try:
+        from scipy.spatial import ConvexHull
+    except Exception:                                   # scipy absent -> skip check
+        return np.ones(n, bool), np.zeros(n, int)
+
+    inside = np.ones(n, bool)
+    n_out = np.zeros(n, int)
+    blocks = [0] if cal_X.shape[1] == 10 else [0, 10]
+    for off in blocks:
+        for k in range(1, 10):
+            cols = [off, off + k]
+            pts = cal_X[:, cols]
+            pts = pts[np.isfinite(pts).all(axis=1)]
+            if len(pts) < 4:
+                continue
+            try:
+                hull = ConvexHull(pts)
+            except Exception:                           # degenerate (collinear) -> skip
+                continue
+            poly = _Path(pts[hull.vertices])
+            q = data_in[:, cols]
+            # OR both winding orientations so boundary points count as in-domain
+            isin = (poly.contains_points(q, radius=1e-9)
+                    | poly.contains_points(q, radius=-1e-9))
+            n_out += (~isin).astype(int)
+            inside &= isin
+    return inside, n_out
+
+
+def harker_figure(data_in, y_pred, cal_X, unit, block_offset=0, in_dom=None):
+    """3x3 Harker panel: SiO2 vs the other 9 oxides, calibration grey + input colour.
+
+    Out-of-domain samples (``in_dom`` False) are over-marked with a red cross.
+    """
     fig = plt.figure(figsize=(10, 7.5))
     cmap, alpha = "hsv", 0.3
     xin = data_in[:, block_offset]
     xcal = cal_X[:, block_offset]
+    out = (~np.asarray(in_dom, bool)) if in_dom is not None else None
     for k in range(9):
         ax = fig.add_subplot(3, 3, k + 1)
         ax.scatter(xcal, cal_X[:, block_offset + k + 1], s=12, linewidths=0,
@@ -143,6 +192,10 @@ def harker_figure(data_in, y_pred, cal_X, unit, block_offset=0):
         sc = ax.scatter(xin, data_in[:, block_offset + k + 1], c=y_pred,
                         cmap=cmap, edgecolors="black", linewidths=0.2,
                         label="Input")
+        if out is not None and out.any():
+            ax.scatter(xin[out], data_in[out, block_offset + k + 1], s=70,
+                       marker="x", color="red", linewidths=1.1, zorder=6,
+                       label="Out of domain")
         fig.colorbar(sc, ax=ax, label=unit)
         ax.set_xlabel(OXIDES[0], fontweight="bold")
         ax.set_ylabel(OXIDES[k + 1], fontweight="bold")
@@ -150,12 +203,15 @@ def harker_figure(data_in, y_pred, cal_X, unit, block_offset=0):
     return fig
 
 
-def build_output_xlsx(data_in, y_pred, target_unit) -> bytes:
+def build_output_xlsx(data_in, y_pred, target_unit, in_dom=None) -> bytes:
     cols = [o.replace("$", "").replace("_", "") for o in OXIDES]
     if data_in.shape[1] == 20:
         cols = [f"C1_{c}" for c in cols] + [f"C2_{c}" for c in cols]
     df = pd.DataFrame(data_in, columns=cols[:data_in.shape[1]])
     df[target_unit.split(" ")[0] + "_pred"] = y_pred
+    if in_dom is not None:
+        df["in_domain"] = np.where(np.asarray(in_dom, bool),
+                                   "yes", "no (extrapolation)")
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
         df.to_excel(w, index=False, sheet_name="Predictions")
@@ -184,25 +240,35 @@ with tab_calc:
     q_target = st.selectbox(" ", list(TARGETS.keys()), key="target")
     tgt = TARGETS[q_target]
 
-    st.subheader("***Step 2: Which liquid/mineral pair?***")
-    # Map each displayed (pretty) pair to its calibration SHEET index by name,
-    # via the canonical sheet-order list -- meter_rank row order is NOT sheet order.
-    sheet_names = sheet_order_names()
-    options = []                                        # (pretty, file_pair, sheet_index)
-    for pretty, file_pair in zip(rank["Pairs"], old["Pairs"]):
-        if isinstance(file_pair, str) and file_pair in sheet_names:
-            options.append((pretty, file_pair, sheet_names.index(file_pair)))
-    pretty_list = [o[0] for o in options]
-    default_idx = pretty_list.index("melt_only-plgsat") if "melt_only-plgsat" in pretty_list else 0
-    sel = st.selectbox("  ", pretty_list, index=default_idx, key="pair")
-    _, file_pair, sheet_index = options[pretty_list.index(sel)]
+    if tgt["key"] == "meltfrac":
+        # Melt fraction is a single melt-only model (all melts); no pair to choose.
+        sheet_index = MELTFRAC_SHEET
+        file_pair = "meltfrac"
+        sel = "melt-fraction (all melts, melt-only)"
+        is_plgsat_hygro = False
+        st.info("**Melt-fraction model** — predicts the cumulative melt fraction "
+                "$F$ (0–1) from melt major elements alone, trained on all experimental "
+                "melts (test RMSE ≈ 0.11). Fill **Component 1 (melt) only**.")
+    else:
+        st.subheader("***Step 2: Which liquid/mineral pair?***")
+        # Map each displayed (pretty) pair to its calibration SHEET index by name,
+        # via the canonical sheet-order list -- meter_rank row order is NOT sheet order.
+        sheet_names = sheet_order_names()
+        options = []                                    # (pretty, file_pair, sheet_index)
+        for pretty, file_pair in zip(rank["Pairs"], old["Pairs"]):
+            if isinstance(file_pair, str) and file_pair in sheet_names:
+                options.append((pretty, file_pair, sheet_names.index(file_pair)))
+        pretty_list = [o[0] for o in options]
+        default_idx = pretty_list.index("melt_only-plgsat") if "melt_only-plgsat" in pretty_list else 0
+        sel = st.selectbox("  ", pretty_list, index=default_idx, key="pair")
+        _, file_pair, sheet_index = options[pretty_list.index(sel)]
 
-    is_plgsat_hygro = (file_pair == "liq-plgsat") and (tgt["key"] == "hygro")
-    if is_plgsat_hygro:
-        st.info("**Melt_only-PlgSat hygrometer** — the model deployed in the paper "
-                "(calibration RMSE ≈ 1.04 wt.%). Apply it only to **Plg-saturated** "
-                "melts: any melt with SiO₂ > 60 wt.%, or melts classified Plg-saturated "
-                "for SiO₂ < 60 wt.%.")
+        is_plgsat_hygro = (file_pair == "liq-plgsat") and (tgt["key"] == "hygro")
+        if is_plgsat_hygro:
+            st.info("**Melt_only-PlgSat hygrometer** — the model deployed in the paper "
+                    "(calibration RMSE ≈ 1.06 wt.%). Apply it only to **Plg-saturated** "
+                    "melts: any melt with SiO₂ > 60 wt.%, or melts classified Plg-saturated "
+                    "for SiO₂ < 60 wt.%.")
 
     st.subheader("***Step 3: Download the input template***")
     with open("Template_input.xlsx", "rb") as fh:
@@ -232,8 +298,30 @@ with tab_calc:
                 with st.spinner("Fitting TabPFN on the calibration data and predicting…"):
                     reg, n_cal = get_tabpfn(sheet_index, tgt["col"])
                     y_pred = np.asarray(reg.predict(data_in), float)
+                    # H2O and pressure are non-negative physical quantities; the
+                    # regressor occasionally returns tiny negative values (down to
+                    # ~-0.01) for genuinely dry/low-P samples. Clamp those to zero.
+                    if tgt["key"] in ("hygro", "baro"):
+                        y_pred = np.clip(y_pred, 0.0, None)
+                    elif tgt["key"] == "meltfrac":
+                        y_pred = np.clip(y_pred, 0.0, 1.0)
                 st.success(f"Done — predicted {q_target} for {len(y_pred)} samples "
                            f"(TabPFN fit on {n_cal} calibration experiments).")
+
+                # Per-model applicability: convex hull of the calibration set in
+                # the SiO2-vs-oxide projections (and the mineral block, if used).
+                in_dom, _n_out = domain_flags(cal_X, data_in)
+                n_outside = int((~in_dom).sum())
+                if n_outside:
+                    st.warning(
+                        f"⚠️ {n_outside} of {len(data_in)} sample(s) fall **outside "
+                        f"the calibration convex hull** in one or more SiO₂–oxide "
+                        f"projections — those predictions are extrapolations and less "
+                        f"reliable. They are flagged in the output file's `in_domain` "
+                        f"column and over-marked with a red ✕ in the Harker panel.")
+                else:
+                    st.info("✓ All samples lie within the calibration convex hull "
+                            "(in-domain).")
 
                 c1, c2, c3 = st.columns(3)
                 c1.metric(f"min {tgt['unit']}", f"{np.nanmin(y_pred):.2f}")
@@ -242,7 +330,7 @@ with tab_calc:
 
                 st.download_button(
                     "**Download predictions (.xlsx)**",
-                    build_output_xlsx(data_in, y_pred, tgt["unit"]),
+                    build_output_xlsx(data_in, y_pred, tgt["unit"], in_dom),
                     file_name="TabPFN_output.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -258,10 +346,10 @@ with tab_calc:
                 st.pyplot(fig1)
 
                 st.write("**Figure 2: Major-element covariations (Component 1)**")
-                st.pyplot(harker_figure(data_in, y_pred, cal_X, tgt["unit"], 0))
+                st.pyplot(harker_figure(data_in, y_pred, cal_X, tgt["unit"], 0, in_dom))
                 if need_w == 20:
                     st.write("**Figure 3: Major-element covariations (Component 2)**")
-                    st.pyplot(harker_figure(data_in, y_pred, cal_X, tgt["unit"], 10))
+                    st.pyplot(harker_figure(data_in, y_pred, cal_X, tgt["unit"], 10, in_dom))
 
 with tab_info:
     st.subheader("Hongze Bo, Ben Klein & Oliver Jagoutz — "
@@ -270,8 +358,14 @@ with tab_info:
         "- **Engine:** [TabPFN](https://github.com/PriorLabs/TabPFN) regressor, "
         "fit in-context on the experimental calibration compilation at request time.\n"
         "- **Headline model:** Melt_only-PlgSat hygrometer (calibration RMSE ≈ 1.04 wt.% "
-        "H₂O; independent arc-differentiation validation RMSE ≈ 1.24 wt.%).\n"
+        "H₂O; independent validation RMSE ≈ 0.89 wt.% over 104 samples spanning the full "
+        "H₂O range, ≈ 1.14 across the hydrous arc-differentiation studies alone).\n"
         "- **Other pairs** (thermometry, barometry, mineral pairs) are provided for "
         "exploration; only the Melt_only family was characterised in the paper.\n"
+        "- **Applicability check:** every prediction is tested against the convex hull "
+        "of the *selected model's* calibration set in the SiO₂–oxide projections "
+        "(and the mineral block, when used). Samples outside the hull are flagged as "
+        "extrapolations in the `in_domain` output column and marked with a red ✕ on "
+        "the Harker panel.\n"
         "- This is a **TabPFN trial deployment**; the RandomForest tool remains at "
         "the original app.")
