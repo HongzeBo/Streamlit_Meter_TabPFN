@@ -222,6 +222,13 @@ def build_output_xlsx(data_in, y_pred, target_unit, in_dom=None) -> bytes:
 # UI
 # ----------------------------------------------------------------------------
 st.set_page_config(page_title="Hygro-Thermobarometer (TabPFN)", layout="wide")
+# Standard web layout: cap the content to a centered max-width column so wide
+# screens get whitespace on both sides (instead of full-bleed edge-to-edge).
+st.markdown(
+    "<style>.block-container{max-width:1080px;margin:0 auto;"
+    "padding-top:2.5rem;padding-left:2.5rem;padding-right:2.5rem;}</style>",
+    unsafe_allow_html=True,
+)
 st.title("Hygro-Thermobarometer (TabPFN) — Bo, Klein & Jagoutz")
 st.caption("TabPFN edition · the deployed Melt_only-PlgSat hygrometer and every "
            "liquid/mineral pair are fit in-context on the calibration data — no "
