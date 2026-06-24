@@ -72,6 +72,13 @@ def load_rank_tables():
 
 
 @st.cache_data(show_spinner=False)
+def load_comparison():
+    """Per-pair test RMSE of TabPFN vs linear / kNN / RF / XGBoost, by target."""
+    xl = pd.ExcelFile("method_comparison.xlsx")
+    return {s: xl.parse(s) for s in xl.sheet_names}
+
+
+@st.cache_data(show_spinner=False)
 def load_calibration(sheet_index: int):
     """Return (X_cal, Y_cal_full) for a calibration sheet.
 
@@ -242,6 +249,13 @@ with tab_calc:
              "(20× 80:20 random splits, N ≥ 200 pairs). H₂O in wt.%, T in °C, "
              "P in kbar — the same numbers as the paper's TabPFN Tables 2–4.***")
     st.dataframe(rank, hide_index=True)
+
+    st.write("***TabPFN vs. baseline methods — test RMSE per pair (same 20× 80:20 "
+             "random splits). TabPFN gives the lowest test error for every pair.***")
+    comp = load_comparison()
+    which = st.radio("Show comparison for:", list(comp.keys()),
+                     horizontal=True, key="cmp_target")
+    st.dataframe(comp[which], hide_index=True)
 
     st.subheader("***Step 1: What do you want to predict?***")
     q_target = st.selectbox(" ", list(TARGETS.keys()), key="target")
