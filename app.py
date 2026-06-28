@@ -245,10 +245,6 @@ tab_calc, tab_info = st.tabs(["**Calc & Ranking**", "**Info**"])
 
 with tab_calc:
     rank, old = load_rank_tables()
-    st.write("***TabPFN test RMSE of each hygro-/thermo-/barometer pair "
-             "(20× 80:20 random splits, N ≥ 200 pairs). H₂O in wt.%, T in °C, "
-             "P in kbar — the same numbers as the paper's TabPFN Tables 2–4.***")
-    st.dataframe(rank, hide_index=True)
 
     st.write("***TabPFN vs. baseline methods — test RMSE per pair (same 20× 80:20 "
              "random splits). TabPFN gives the lowest test error for every pair.***")
