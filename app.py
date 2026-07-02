@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# deploy: 2026-07-02 corrected-DB models (hygrometer 1.00, primary-start melt-fraction n=1056)
 # -*- coding: utf-8 -*-
 # TabPFN port of the Hygro-Thermobarometer web tool.
 # Original RF app: Bo, Klein & Jagoutz (2025), HongzeBo/Streamlit_Meter.
