@@ -284,7 +284,7 @@ with tab_calc:
         is_plgsat_hygro = (file_pair == "liq-plgsat") and (tgt["key"] == "hygro")
         if is_plgsat_hygro:
             st.info("**Melt_only-PlgSat hygrometer** — the model deployed in the paper "
-                    "(calibration RMSE ≈ 1.06 wt.%). Apply it only to **Plg-saturated** "
+                    "(calibration RMSE ≈ 1.00 wt.%). Apply it only to **Plg-saturated** "
                     "melts: any melt with SiO₂ > 60 wt.%, or melts classified Plg-saturated "
                     "for SiO₂ < 60 wt.%.")
 
@@ -375,9 +375,9 @@ with tab_info:
     st.markdown(
         "- **Engine:** [TabPFN](https://github.com/PriorLabs/TabPFN) regressor, "
         "fit in-context on the experimental calibration compilation at request time.\n"
-        "- **Headline model:** Melt_only-PlgSat hygrometer (calibration RMSE ≈ 1.04 wt.% "
-        "H₂O; independent validation RMSE ≈ 0.89 wt.% over 104 samples spanning the full "
-        "H₂O range, ≈ 1.14 across the hydrous arc-differentiation studies alone).\n"
+        "- **Headline model:** Melt_only-PlgSat hygrometer (calibration RMSE ≈ 1.00 wt.% "
+        "H₂O; independent validation RMSE ≈ 0.86 wt.% over 104 samples spanning the full "
+        "H₂O range, ≈ 1.10 across the hydrous arc-differentiation studies alone).\n"
         "- **Other pairs** (thermometry, barometry, mineral pairs) are provided for "
         "exploration; only the Melt_only family was characterised in the paper.\n"
         "- **Applicability check:** every prediction is tested against the convex hull "
