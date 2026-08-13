@@ -1,7 +1,11 @@
 #!/usr/bin/env python
-# deploy: 2026-07-30 per-sample prediction intervals for the PlgSat hygrometer
-#         (manuscript Section 6.1); previous: 2026-07-02 corrected-DB models
-#         (hygrometer 1.00, primary-start melt-fraction n=1056)
+# deploy: 2026-08-13 melt-fraction calibration moved to the raised starting-Mg#
+#         window 60-75 (n=847 melts / 126 series), matching Part 2 Section 5;
+#         previous: 2026-07-30 per-sample prediction intervals for the
+#         PlgSat hygrometer (manuscript Section 6.1); 2026-07-02 corrected-DB models
+# NOTE Part 2 Fig. 7 (b, d) was computed with the earlier starting-Mg# 55-75
+#      melt-fraction calibration, so melt fractions reproduced with this tool
+#      will not match that figure exactly; the figure caption says so.
 # -*- coding: utf-8 -*-
 # TabPFN port of the Hygro-Thermobarometer web tool.
 # Original RF app: Bo, Klein & Jagoutz (2025), HongzeBo/Streamlit_Meter.
@@ -29,7 +33,7 @@ import streamlit as st
 # ----------------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------------
-CAL_BOOK = "allexps_allpairs.xlsx"          # 57 calibration sheets (index-aligned)
+CAL_BOOK = "allexps_allpairs.xlsx"          # 57 pair sheets (index-aligned) + meltfrac
 OXIDES = ["SiO$_2$", "TiO$_2$", "Al$_2$O$_3$", "FeOT", "MnO",
           "MgO", "CaO", "Na$_2$O", "K$_2$O", "P$_2$O$_5$"]
 
@@ -41,7 +45,15 @@ TARGETS = {
     "Pressure (kbar)":    dict(key="baro", col=-2, unit="P (kbar)"),
     "Melt fraction (melt-only)": dict(key="meltfrac", col=-1, unit="Melt fraction"),
 }
-MELTFRAC_SHEET = 57   # appended calibration sheet: all melts, 10 majors -> F
+# Appended calibration sheet (847 rows x 13 cols): 10 melt majors renormalised to
+# 100 wt.%, then the cumulative melt fraction F repeated in all three trailing
+# meta slots, so the generic [H2O, P, T] slicing below picks F at col = -1.
+# Source: experimental series whose parental melt has a starting Mg# of 60-75
+# (Water_Hygrometer/data/ml_features/exp_meltfraction_primarymgnum60_75.xlsx,
+#  126 series).  This sheet exists ONLY in the deployed copy of the workbook:
+#  Water_Hygrometer/data/experiments/allexps_allpairs.xlsx has 57 sheets and no
+#  meltfrac sheet, so never overwrite this file with that one wholesale.
+MELTFRAC_SHEET = 57
 
 # Percentiles of the TabPFN predictive distribution reported for the deployed
 # Melt_only-PlgSat hygrometer (paper Section 6.1): mean = point prediction,
@@ -273,14 +285,17 @@ with tab_calc:
     tgt = TARGETS[q_target]
 
     if tgt["key"] == "meltfrac":
-        # Melt fraction is a single melt-only model (all melts); no pair to choose.
+        # Melt fraction is a single melt-only model, calibrated on the experimental
+        # series with a starting Mg# of 60-75 (not on all melts); no pair to choose.
         sheet_index = MELTFRAC_SHEET
         file_pair = "meltfrac"
-        sel = "melt-fraction (all melts, melt-only)"
+        sel = "melt-fraction (primitive series, starting Mg# 60–75, melt-only)"
         is_plgsat_hygro = False
         st.info("**Melt-fraction model** — predicts the cumulative melt fraction "
-                "$F$ (0–1) from melt major elements alone, trained on all experimental "
-                "melts (test RMSE ≈ 0.11). Fill **Component 1 (melt) only**.")
+                "$F$ (0–1) from melt major elements alone, trained on experimental "
+                "series that begin from near-primitive melts (starting Mg# 60–75; "
+                "847 melts from 126 series; held-out test RMSE ≈ 0.07 in $F$, "
+                "R² ≈ 0.92). Fill **Component 1 (melt) only**.")
     else:
         st.subheader("***Step 2: Which liquid/mineral pair?***")
         # Map each displayed (pretty) pair to its calibration SHEET index by name,
@@ -432,6 +447,15 @@ with tab_info:
         "5th–95th = 90% prediction interval). Coverage was verified on 20 held-out test "
         "splits (the nominal 90% interval covers ≈ 91% of true values). Intervals are "
         "meaningful only within the calibration domain (`in_domain = yes`).\n"
+        "- **Melt-fraction model:** cumulative melt fraction $F$ from melt majors "
+        "alone, calibrated on the experimental series whose parental melt has a "
+        "starting Mg# of 60–75 (847 melts, 126 series, 41 studies), the calibration "
+        "reported in Part II, Section 5. Held-out skill over 20 × 80:20 random splits: "
+        "test RMSE ≈ 0.073 in $F$, R² ≈ 0.92. It should not be applied to series that "
+        "start below a Mg# of 60. Part II Fig. 7 (b, d) was computed with the earlier, "
+        "wider 55–75 window, so melt fractions recomputed here differ from that figure: "
+        "over the Part II arc compilation the median $F$ moves from 0.50 to 0.47, and "
+        "for an individual composition the shift can be larger and of either sign.\n"
         "- **Other pairs** (thermometry, barometry, mineral pairs) are benchmarked in "
         "the paper (all pairs with N ≥ 200); the Melt_only-PlgSat hygrometer receives the "
         "fullest characterization (independent validation, sensitivity tests, intervals).\n"

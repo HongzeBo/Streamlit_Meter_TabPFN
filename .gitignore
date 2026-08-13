@@ -6,3 +6,6 @@ uploads/*
 downloads/*
 !uploads/.gitkeep
 !downloads/.gitkeep
+
+# local backups of the calibration workbook
+*.bak_*
