@@ -1,5 +1,7 @@
 #!/usr/bin/env python
-# deploy: 2026-07-02 corrected-DB models (hygrometer 1.00, primary-start melt-fraction n=1056)
+# deploy: 2026-07-30 per-sample prediction intervals for the PlgSat hygrometer
+#         (manuscript Section 6.1); previous: 2026-07-02 corrected-DB models
+#         (hygrometer 1.00, primary-start melt-fraction n=1056)
 # -*- coding: utf-8 -*-
 # TabPFN port of the Hygro-Thermobarometer web tool.
 # Original RF app: Bo, Klein & Jagoutz (2025), HongzeBo/Streamlit_Meter.
@@ -40,6 +42,11 @@ TARGETS = {
     "Melt fraction (melt-only)": dict(key="meltfrac", col=-1, unit="Melt fraction"),
 }
 MELTFRAC_SHEET = 57   # appended calibration sheet: all melts, 10 majors -> F
+
+# Percentiles of the TabPFN predictive distribution reported for the deployed
+# Melt_only-PlgSat hygrometer (paper Section 6.1): mean = point prediction,
+# 16th-84th = 68% prediction interval, 5th-95th = 90% prediction interval.
+HYGRO_QUANTILES = [0.05, 0.16, 0.50, 0.84, 0.95]
 
 
 def sheet_order_names():
@@ -211,12 +218,19 @@ def harker_figure(data_in, y_pred, cal_X, unit, block_offset=0, in_dom=None):
     return fig
 
 
-def build_output_xlsx(data_in, y_pred, target_unit, in_dom=None) -> bytes:
+def build_output_xlsx(data_in, y_pred, target_unit, in_dom=None,
+                      quantiles=None) -> bytes:
     cols = [o.replace("$", "").replace("_", "") for o in OXIDES]
     if data_in.shape[1] == 20:
         cols = [f"C1_{c}" for c in cols] + [f"C2_{c}" for c in cols]
     df = pd.DataFrame(data_in, columns=cols[:data_in.shape[1]])
     df[target_unit.split(" ")[0] + "_pred"] = y_pred
+    if quantiles is not None:
+        # PlgSat hygrometer: percentiles of the TabPFN predictive distribution
+        # (point prediction = distribution mean; q16-q84 = 68%, q05-q95 = 90% prediction
+        # interval; meaningful only for in-domain samples).
+        for name, vals in quantiles.items():
+            df[name] = vals
     if in_dom is not None:
         df["in_domain"] = np.where(np.asarray(in_dom, bool),
                                    "yes", "no (extrapolation)")
@@ -285,8 +299,10 @@ with tab_calc:
         if is_plgsat_hygro:
             st.info("**Melt_only-PlgSat hygrometer** — the model deployed in the paper "
                     "(calibration RMSE ≈ 1.00 wt.%). Apply it only to **Plg-saturated** "
-                    "melts: any melt with SiO₂ > 60 wt.%, or melts classified Plg-saturated "
-                    "for SiO₂ < 60 wt.%.")
+                    "melts. Where Plg saturation cannot be confirmed petrographically, "
+                    "the paper predicts it with a random-forest classifier from the melt "
+                    "composition (screening bounds SiO₂ < 80 wt.%, MgO < 15 wt.%; "
+                    "accuracy ≈ 86%).")
 
     st.subheader("***Step 3: Download the input template***")
     with open("Template_input.xlsx", "rb") as fh:
@@ -315,14 +331,33 @@ with tab_calc:
                 data_in = renormalize(data_in)
                 with st.spinner("Fitting TabPFN on the calibration data and predicting…"):
                     reg, n_cal = get_tabpfn(sheet_index, tgt["col"])
-                    y_pred = np.asarray(reg.predict(data_in), float)
-                    # H2O and pressure are non-negative physical quantities; the
-                    # regressor occasionally returns tiny negative values (down to
-                    # ~-0.01) for genuinely dry/low-P samples. Clamp those to zero.
-                    if tgt["key"] in ("hygro", "baro"):
-                        y_pred = np.clip(y_pred, 0.0, None)
-                    elif tgt["key"] == "meltfrac":
-                        y_pred = np.clip(y_pred, 0.0, 1.0)
+                    quants = None
+                    if is_plgsat_hygro:
+                        # Deployed hygrometer (paper Section 6.1): the point
+                        # prediction stays the distribution MEAN (identical to all
+                        # previously served/published predictions, incl. Part II);
+                        # a second call returns the 5/16/50/84/95th percentiles of
+                        # the TabPFN predictive distribution (16th-84th = 68% and
+                        # 5th-95th = 90% prediction intervals). H2O is non-negative,
+                        # so clamp at zero (never shrinks coverage).
+                        y_pred = np.clip(np.asarray(reg.predict(data_in), float),
+                                         0.0, None)
+                        qraw = reg.predict(data_in, output_type="quantiles",
+                                           quantiles=HYGRO_QUANTILES)
+                        q05, q16, q50, q84, q95 = [
+                            np.clip(np.asarray(v, float), 0.0, None) for v in qraw]
+                        quants = {"H2O_q05": q05, "H2O_q16": q16,
+                                  "H2O_q50_median": q50,
+                                  "H2O_q84": q84, "H2O_q95": q95}
+                    else:
+                        y_pred = np.asarray(reg.predict(data_in), float)
+                        # H2O and pressure are non-negative physical quantities; the
+                        # regressor occasionally returns tiny negative values (down to
+                        # ~-0.01) for genuinely dry/low-P samples. Clamp those to zero.
+                        if tgt["key"] in ("hygro", "baro"):
+                            y_pred = np.clip(y_pred, 0.0, None)
+                        elif tgt["key"] == "meltfrac":
+                            y_pred = np.clip(y_pred, 0.0, 1.0)
                 st.success(f"Done — predicted {q_target} for {len(y_pred)} samples "
                            f"(TabPFN fit on {n_cal} calibration experiments).")
 
@@ -341,6 +376,18 @@ with tab_calc:
                     st.info("✓ All samples lie within the calibration convex hull "
                             "(in-domain).")
 
+                if is_plgsat_hygro:
+                    st.info(
+                        "**Per-sample prediction intervals** — the output file "
+                        "reports the 5th/16th/50th/84th/95th percentiles of the "
+                        "TabPFN predictive distribution for every sample "
+                        "(the reported prediction is the distribution mean; 16th–84th = 68% interval; "
+                        "5th–95th = **90% prediction interval**). Intervals are "
+                        "meaningful only within the calibration domain "
+                        "(`in_domain = yes`); their width tracks the local density "
+                        "of calibration data (median 90% interval ≈ ±0.02 wt.% "
+                        "below 2 wt.% H₂O, ±1.3 at 2–6, ±1.9 above 6).")
+
                 c1, c2, c3 = st.columns(3)
                 c1.metric(f"min {tgt['unit']}", f"{np.nanmin(y_pred):.2f}")
                 c2.metric("mean", f"{np.nanmean(y_pred):.2f}")
@@ -348,7 +395,8 @@ with tab_calc:
 
                 st.download_button(
                     "**Download predictions (.xlsx)**",
-                    build_output_xlsx(data_in, y_pred, tgt["unit"], in_dom),
+                    build_output_xlsx(data_in, y_pred, tgt["unit"], in_dom,
+                                      quantiles=quants),
                     file_name="TabPFN_output.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -378,8 +426,15 @@ with tab_info:
         "- **Headline model:** Melt_only-PlgSat hygrometer (calibration RMSE ≈ 1.00 wt.% "
         "H₂O; independent validation RMSE ≈ 0.86 wt.% over 104 samples spanning the full "
         "H₂O range, ≈ 1.10 across the hydrous arc-differentiation studies alone).\n"
-        "- **Other pairs** (thermometry, barometry, mineral pairs) are provided for "
-        "exploration; only the Melt_only family was characterised in the paper.\n"
+        "- **Per-sample uncertainty (PlgSat hygrometer):** the output file reports "
+        "each sample's 5th/16th/50th/84th/95th percentiles of the TabPFN predictive "
+        "distribution (the reported prediction is the distribution mean; 16th–84th = 68% interval; "
+        "5th–95th = 90% prediction interval). Coverage was verified on 20 held-out test "
+        "splits (the nominal 90% interval covers ≈ 91% of true values). Intervals are "
+        "meaningful only within the calibration domain (`in_domain = yes`).\n"
+        "- **Other pairs** (thermometry, barometry, mineral pairs) are benchmarked in "
+        "the paper (all pairs with N ≥ 200); the Melt_only-PlgSat hygrometer receives the "
+        "fullest characterization (independent validation, sensitivity tests, intervals).\n"
         "- **Applicability check:** every prediction is tested against the convex hull "
         "of the *selected model's* calibration set in the SiO₂–oxide projections "
         "(and the mineral block, when used). Samples outside the hull are flagged as "
