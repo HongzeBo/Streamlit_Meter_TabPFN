@@ -1,29 +1,14 @@
 #!/usr/bin/env python
-# deploy: 2026-08-13 melt-fraction calibration moved to the raised starting-Mg#
-#         window 60-75 (n=847 melts / 126 series), matching Part 2 Section 5;
-#         previous: 2026-07-30 per-sample prediction intervals for the
-#         PlgSat hygrometer (manuscript Section 6.1); 2026-07-02 corrected-DB models
-# NOTE Part 2 Fig. 7 (b, d) was computed with the earlier starting-Mg# 55-75
-#      melt-fraction calibration, so melt fractions reproduced with this tool
-#      will not match that figure exactly; the figure caption says so.
 # -*- coding: utf-8 -*-
-# TabPFN port of the Hygro-Thermobarometer web tool.
-# Original RF app: Bo, Klein & Jagoutz (2025), HongzeBo/Streamlit_Meter.
-#
-# What changed vs. the RF app:
-#   * The prediction engine is TabPFN (in-context foundation model) instead of
-#     pre-trained RandomForest .pkl files. TabPFN needs no saved model: for the
-#     liquid/mineral pair you pick, it is *fit on the calibration sheet on the fly*
-#     and predicts immediately. This removes the 130+ MB of sklearn-1.2.0 .pkl
-#     models (and the sklearn-version wall) -- the app ships only the 2.7 MB
-#     calibration workbook.
-#   * The deployed headline model of the paper -- Melt_only-PlgSat hygrometer --
-#     is the default selection.
-#   * The hybrid RF tab was dropped (the trend+residual hybrid was retired).
+# Hygro-thermobarometer web tool of Bo, Klein & Jagoutz (Part I): a TabPFN regressor is
+# fit in-context on the experimental calibration workbook for the liquid/mineral pair
+# selected, so no model files are stored. Also serves the melt-fraction model of Part II
+# (Section 5) and the plagioclase-saturation classifier of Part I (Section 7.1).
+# deploy history: 2026-10-30 classifier tab, seven-projection domain check, template
+#   header FeOT, shortened Info page; 2026-08-13 melt-fraction calibration (starting
+#   Mg# 60-75); 2026-07-30 per-sample prediction intervals; 2026-07-02 corrected-DB models.
 
 import io
-import os
-import uuid
 
 import numpy as np
 import pandas as pd
@@ -59,6 +44,18 @@ MELTFRAC_SHEET = 57
 # Melt_only-PlgSat hygrometer (paper Section 6.1): mean = point prediction,
 # 16th-84th = 68% prediction interval, 5th-95th = 90% prediction interval.
 HYGRO_QUANTILES = [0.05, 0.16, 0.50, 0.84, 0.95]
+
+# Calibration-domain check (paper Section 7.1): convex hulls of the calibration set in the
+# seven SiO2-vs-oxide projections TiO2, Al2O3, FeOT, MgO, CaO, Na2O, K2O (MnO and P2O5 are
+# too often unreported to define a domain). Indices into a 10-oxide block.
+DOMAIN_PROJ = [1, 2, 3, 5, 6, 7, 8]
+
+# Plagioclase-saturation classifier (paper Section 7.1; the screen used for the natural
+# samples of Part II): RandomForest(64 trees, class-weighted, random_state=0) retrained
+# deterministically from the training workbook (10 raw melt majors, label in the last column).
+# Compositions with SiO2 >= 80 or MgO >= 15 wt.% are classed as not Plg-saturated outright.
+PLGSAT_XLSX = "assets/plg-sat.xlsx"
+CLF_SIO2_MAX, CLF_MGO_MAX = 80.0, 15.0
 
 
 def sheet_order_names():
@@ -126,6 +123,31 @@ def get_tabpfn(sheet_index: int, target_col: int):
     return reg, int(ok.sum())
 
 
+@st.cache_resource(show_spinner=False)
+def get_plg_classifier():
+    """Deterministic retrain of the paper's Plg-saturation classifier (Section 7.1)."""
+    from sklearn.ensemble import RandomForestClassifier
+    data = pd.read_excel(PLGSAT_XLSX, sheet_name=0, header=None).to_numpy(float)
+    X, y = data[:, :-4], data[:, -1]
+    clf = RandomForestClassifier(n_estimators=64, class_weight="balanced",
+                                 random_state=0).fit(X, y)
+    return clf, int(len(y))
+
+
+def classify_plgsat(X10):
+    """Apply the classifier as in the paper: majors renormalised to 100 wt.%, then
+    SiO2 >= 80 or MgO >= 15 wt.% -> not Plg-saturated regardless of the vote.
+    Returns (plg_saturated int[n], P(Plg-saturated) float[n], screened bool[n]).
+    """
+    clf, _ = get_plg_classifier()
+    X = renormalize(np.asarray(X10, float))
+    prob = clf.predict_proba(X)[:, list(clf.classes_).index(1.0)]
+    sat = clf.predict(X).astype(int)
+    screened = (X[:, 0] >= CLF_SIO2_MAX) | (X[:, 5] >= CLF_MGO_MAX)
+    sat[screened] = 0
+    return sat, prob, screened
+
+
 def renormalize(X: np.ndarray) -> np.ndarray:
     """Renormalise each 10-oxide block to sum 100 wt.% (10- or 20-col input)."""
     X = np.asarray(X, float).copy()
@@ -164,8 +186,8 @@ def domain_flags(cal_X, data_in):
 
     For every block present in the upload (melt majors at columns 0-9, and the
     mineral majors at 10-19 when a second component is supplied) we build the
-    SiO2-vs-oxide convex hull of the calibration set for the same nine
-    projections shown in the Harker panel, and test each input row against all
+    SiO2-vs-oxide convex hull of the calibration set for the seven projections
+    of ``DOMAIN_PROJ`` (paper Section 7.1), and test each input row against all
     of them. A sample is in-domain only when it lies inside every projection's
     hull; otherwise the prediction is an extrapolation. Returns
     ``(in_domain bool[n], n_out int[n])`` where ``n_out`` counts how many
@@ -182,7 +204,7 @@ def domain_flags(cal_X, data_in):
     n_out = np.zeros(n, int)
     blocks = [0] if cal_X.shape[1] == 10 else [0, 10]
     for off in blocks:
-        for k in range(1, 10):
+        for k in DOMAIN_PROJ:
             cols = [off, off + k]
             pts = cal_X[:, cols]
             pts = pts[np.isfinite(pts).all(axis=1)]
@@ -208,7 +230,7 @@ def harker_figure(data_in, y_pred, cal_X, unit, block_offset=0, in_dom=None):
     Out-of-domain samples (``in_dom`` False) are over-marked with a red cross.
     """
     fig = plt.figure(figsize=(10, 7.5))
-    cmap, alpha = "hsv", 0.3
+    cmap, alpha = "viridis", 0.3
     xin = data_in[:, block_offset]
     xcal = cal_X[:, block_offset]
     out = (~np.asarray(in_dom, bool)) if in_dom is not None else None
@@ -268,7 +290,7 @@ st.caption("TabPFN edition · the deployed Melt_only-PlgSat hygrometer and every
            "liquid/mineral pair are fit in-context on the calibration data — no "
            "pre-trained model files.")
 
-tab_calc, tab_info = st.tabs(["**Calc & Ranking**", "**Info**"])
+tab_calc, tab_clf, tab_info = st.tabs(["**Calc & Ranking**", "**Plg-saturation classifier**", "**Info**"])
 
 with tab_calc:
     rank, old = load_rank_tables()
@@ -313,11 +335,10 @@ with tab_calc:
         is_plgsat_hygro = (file_pair == "liq-plgsat") and (tgt["key"] == "hygro")
         if is_plgsat_hygro:
             st.info("**Melt_only-PlgSat hygrometer** — the model deployed in the paper "
-                    "(calibration RMSE ≈ 1.00 wt.%). Apply it only to **Plg-saturated** "
-                    "melts. Where Plg saturation cannot be confirmed petrographically, "
-                    "the paper predicts it with a random-forest classifier from the melt "
-                    "composition (screening bounds SiO₂ < 80 wt.%, MgO < 15 wt.%; "
-                    "accuracy ≈ 86%).")
+                    "(random-split test RMSE ≈ 1.00 wt.% H₂O). Apply it only to **Plg-saturated** "
+                    "melts. Establish Plg saturation from petrological evidence where possible; "
+                    "where none exists, the classifier tab screens melts by composition "
+                    "(accuracy ≈ 86%).")
 
     st.subheader("***Step 3: Download the input template***")
     with open("Template_input.xlsx", "rb") as fh:
@@ -383,7 +404,7 @@ with tab_calc:
                 if n_outside:
                     st.warning(
                         f"⚠️ {n_outside} of {len(data_in)} sample(s) fall **outside "
-                        f"the calibration convex hull** in one or more SiO₂–oxide "
+                        f"the calibration convex hull** in one or more of the seven SiO₂–oxide "
                         f"projections — those predictions are extrapolations and less "
                         f"reliable. They are flagged in the output file's `in_domain` "
                         f"column and over-marked with a red ✕ in the Harker panel.")
@@ -400,8 +421,7 @@ with tab_calc:
                         "5th–95th = **90% prediction interval**). Intervals are "
                         "meaningful only within the calibration domain "
                         "(`in_domain = yes`); their width tracks the local density "
-                        "of calibration data (median 90% interval ≈ ±0.02 wt.% "
-                        "below 2 wt.% H₂O, ±1.3 at 2–6, ±1.9 above 6).")
+                        "of calibration data.")
 
                 c1, c2, c3 = st.columns(3)
                 c1.metric(f"min {tgt['unit']}", f"{np.nanmin(y_pred):.2f}")
@@ -432,37 +452,98 @@ with tab_calc:
                     st.write("**Figure 3: Major-element covariations (Component 2)**")
                     st.pyplot(harker_figure(data_in, y_pred, cal_X, tgt["unit"], 10, in_dom))
 
-with tab_info:
-    st.subheader("Hongze Bo, Ben Klein & Oliver Jagoutz — "
-                 "*Effect of H₂O on Magmatic Evolution Systematics* (in revision).")
+with tab_clf:
+    st.write("***Plagioclase-saturation classifier (Part I, Section 7.1)***")
     st.markdown(
-        "- **Engine:** [TabPFN](https://github.com/PriorLabs/TabPFN) regressor, "
-        "fit in-context on the experimental calibration compilation at request time.\n"
-        "- **Headline model:** Melt_only-PlgSat hygrometer (calibration RMSE ≈ 1.00 wt.% "
-        "H₂O; independent validation RMSE ≈ 0.86 wt.% over 104 samples spanning the full "
-        "H₂O range, ≈ 1.10 across the hydrous arc-differentiation studies alone).\n"
-        "- **Per-sample uncertainty (PlgSat hygrometer):** the output file reports "
-        "each sample's 5th/16th/50th/84th/95th percentiles of the TabPFN predictive "
-        "distribution (the reported prediction is the distribution mean; 16th–84th = 68% interval; "
-        "5th–95th = 90% prediction interval). Coverage was verified on 20 held-out test "
-        "splits (the nominal 90% interval covers ≈ 91% of true values). Intervals are "
-        "meaningful only within the calibration domain (`in_domain = yes`).\n"
-        "- **Melt-fraction model:** cumulative melt fraction $F$ from melt majors "
-        "alone, calibrated on the experimental series whose parental melt has a "
-        "starting Mg# of 60–75 (847 melts, 126 series, 41 studies), the calibration "
-        "reported in Part II, Section 5. Held-out skill over 20 × 80:20 random splits: "
-        "test RMSE ≈ 0.073 in $F$, R² ≈ 0.92. It should not be applied to series that "
-        "start below a Mg# of 60. Part II Fig. 7 (b, d) was computed with the earlier, "
-        "wider 55–75 window, so melt fractions recomputed here differ from that figure: "
-        "over the Part II arc compilation the median $F$ moves from 0.50 to 0.47, and "
-        "for an individual composition the shift can be larger and of either sign.\n"
-        "- **Other pairs** (thermometry, barometry, mineral pairs) are benchmarked in "
-        "the paper (all pairs with N ≥ 200); the Melt_only-PlgSat hygrometer receives the "
-        "fullest characterization (independent validation, sensitivity tests, intervals).\n"
-        "- **Applicability check:** every prediction is tested against the convex hull "
-        "of the *selected model's* calibration set in the SiO₂–oxide projections "
-        "(and the mineral block, when used). Samples outside the hull are flagged as "
-        "extrapolations in the `in_domain` output column and marked with a red ✕ on "
-        "the Harker panel.\n"
-        "- This is a **TabPFN trial deployment**; the RandomForest tool remains at "
-        "the original app.")
+        "The Melt_only-PlgSat hygrometer applies only to melts that have reached plagioclase "
+        "saturation. We recommend establishing this from petrological evidence, such as "
+        "plagioclase phenocrysts or microlites or a plagioclase-bearing cotectic assemblage. "
+        "Where no such evidence exists, this classifier predicts Plg saturation from the melt "
+        "major elements alone, with the random-forest model that screened the natural samples "
+        "of Part II (accuracy ≈ 86% on random splits of the experimental database, ≈ 65% when "
+        "whole studies are held out). It is not recommended as a determination of Plg "
+        "saturation for an individual sample, but it is a useful filter when cleaning a large "
+        "dataset. Compositions with SiO₂ ≥ 80 wt.% or MgO ≥ 15 wt.% are always classed as not "
+        "Plg-saturated.")
+
+    st.subheader("***Step 1: Download the input template (melt only)***")
+    with open("assets/Template_input_plgsat.xlsx", "rb") as fh:
+        st.download_button("**Template_input_plgsat.xlsx**", fh,
+                           file_name="Template_input_plgsat.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key="dl_clf_template")
+
+    st.subheader("***Step 2: Upload your data (Component 1 only)***")
+    up_c = st.file_uploader("  ", type=["xlsx"], key="upload_clf")
+
+    if up_c is not None:
+        try:
+            data_c = read_template(up_c)
+        except Exception as e:                      # noqa: BLE001
+            st.error(f"Could not read the upload — please use the template. ({e})")
+            data_c = None
+
+        if data_c is not None and len(data_c):
+            if data_c.shape[1] != 10:
+                st.error("The classifier uses the melt composition only. Fill Component 1 and "
+                         "leave Component 2 blank.")
+            else:
+                with st.spinner("Training the classifier on the experimental database and classifying…"):
+                    sat, prob, screened = classify_plgsat(data_c)
+                    _, n_train = get_plg_classifier()
+                n = len(sat)
+                st.success(f"Done — {int(sat.sum())} of {n} samples classed as Plg-saturated "
+                           f"(classifier trained on {n_train} experimental melts).")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Plg-saturated", int(sat.sum()))
+                c2.metric("not Plg-saturated", int(n - sat.sum()))
+                c3.metric("outside screening bounds", int(screened.sum()))
+
+                cols = [o.replace("$", "").replace("_", "") for o in OXIDES]
+                out = pd.DataFrame(renormalize(data_c), columns=cols)
+                out["Plg_saturated"] = np.where(sat == 1, "yes", "no")
+                out["P_Plg_saturated"] = np.round(prob, 3)
+                out["outside_screening_bounds"] = np.where(screened, "yes", "no")
+                buf = io.BytesIO()
+                with pd.ExcelWriter(buf, engine="openpyxl") as w:
+                    out.to_excel(w, index=False, sheet_name="Classification")
+                st.download_button("**Download classification (.xlsx)**", buf.getvalue(),
+                                   file_name="PlgSat_classification.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key="dl_clf_result")
+
+                figc = plt.figure(figsize=(10, 2))
+                plt.hist(prob, bins=20, range=(0, 1), color="wheat", edgecolor="black", linewidth=0.9)
+                plt.axvline(0.5, color="black", linestyle="--", linewidth=0.8)
+                plt.xlabel("P(Plg-saturated)", fontweight="bold")
+                plt.ylabel("Frequency", fontweight="bold")
+                st.write("**Distribution of the classifier probability (dashed line = decision threshold)**")
+                st.pyplot(figc)
+
+with tab_info:
+    st.markdown(
+        "**Reference.** Bo, H., Klein, B. Z. & Jagoutz, O., *Water Controls on Magmatic "
+        "Differentiation I: Experimental Constraints and Melt-Composition Hygrometry* (Part I) "
+        "and its companion paper on global H₂O distributions (Part II). The models, their "
+        "benchmarks and the sensitivity tests are described there; this page only says how to "
+        "use the tool.\n\n"
+        "**What it does.** For the liquid/mineral pair you select, a "
+        "[TabPFN](https://github.com/PriorLabs/TabPFN) regressor is fit in-context on the "
+        "experimental calibration compilation and applied to your samples. The default is the "
+        "Melt_only-PlgSat hygrometer (random-split test RMSE ≈ 1.00 wt.% H₂O), which needs only "
+        "the melt major elements. The melt-fraction model (Part II, Section 5) and the "
+        "plagioclase-saturation classifier (accuracy ≈ 86%) have their own entries.\n\n"
+        "**How to use it.** (1) Choose the target and the pair. (2) Download the template and "
+        "fill the ten major oxides in wt.%, with all iron as FeOT; fill Component 2 only for "
+        "mineral-bearing pairs. (3) Upload the file; the oxides are renormalised to 100 wt.% on "
+        "an anhydrous basis. (4) Download the predictions. The Melt_only-PlgSat hygrometer also "
+        "reports per-sample 68% and 90% prediction intervals in the output file.\n\n"
+        "**Limitations.** Use the Melt_only-PlgSat hygrometer only for melts that have reached "
+        "plagioclase saturation, established from petrological evidence where possible (see the "
+        "classifier tab). Every sample is tested against the calibration domain of the selected "
+        "model in seven SiO₂–oxide projections; samples flagged `in_domain = no` are "
+        "extrapolations and should not be used. The models are calibrated on experimental "
+        "glasses, so the bulk compositions of phenocryst-rich rocks and of mixed magmas carry "
+        "additional bias (Part I, Sections 7.3–7.4). Whether a sample is suitable remains the "
+        "user's judgement.\n\n"
+        "Source code: https://github.com/HongzeBo/Streamlit_Meter_TabPFN")
