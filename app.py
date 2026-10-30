@@ -286,9 +286,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.title("Hygro-Thermobarometer (TabPFN) — Bo, Klein & Jagoutz")
-st.caption("TabPFN edition · the deployed Melt_only-PlgSat hygrometer and every "
-           "liquid/mineral pair are fit in-context on the calibration data — no "
-           "pre-trained model files.")
 
 tab_calc, tab_clf, tab_info = st.tabs(["**Calc & Ranking**", "**Plg-saturation classifier**", "**Info**"])
 
