@@ -277,7 +277,7 @@ def build_output_xlsx(data_in, y_pred, target_unit, in_dom=None,
 # ----------------------------------------------------------------------------
 # UI
 # ----------------------------------------------------------------------------
-st.set_page_config(page_title="Hygro-Thermobarometer (TabPFN)", layout="wide")
+st.set_page_config(page_title="Hygro-Thermobarometer", layout="wide")
 # Standard web layout: cap the content to a centered max-width column so wide
 # screens get whitespace on both sides (instead of full-bleed edge-to-edge).
 st.markdown(
@@ -285,15 +285,16 @@ st.markdown(
     "padding-top:2.5rem;padding-left:2.5rem;padding-right:2.5rem;}</style>",
     unsafe_allow_html=True,
 )
-st.title("Hygro-Thermobarometer (TabPFN) — Bo, Klein & Jagoutz")
+st.title("Hygro-Thermobarometer Based on a Tabular Foundation Model — Bo, Klein & Jagoutz")
 
 tab_calc, tab_clf, tab_info = st.tabs(["**Calc & Ranking**", "**Plg-saturation classifier**", "**Info**"])
 
 with tab_calc:
     rank, old = load_rank_tables()
 
-    st.write("***TabPFN vs. baseline methods — test RMSE per pair (same 20× 80:20 "
-             "random splits). TabPFN gives the lowest test error for every pair.***")
+    st.write("***Rankings of hygrometers and thermobarometers — test RMSE per pair, "
+             "TabPFN vs. baseline methods on the same 20× 80:20 random splits. TabPFN "
+             "gives the lowest test error for every pair.***")
     comp = load_comparison()
     which = st.radio("Show comparison for:", list(comp.keys()),
                      horizontal=True, key="cmp_target")
